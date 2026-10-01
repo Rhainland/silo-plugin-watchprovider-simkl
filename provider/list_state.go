@@ -22,12 +22,23 @@ const (
 	cursorProgressShows          = "simkl.progress.shows"
 	cursorProgressAnime          = "simkl.progress.anime"
 
-	// The removed_from_list stamps are recorded so that a removal on Simkl,
-	// which the import cannot apply, can be reported once the plugin contract
-	// carries import warnings.
+	// A removal on Simkl moves a list's removed_from_list stamp. The watched
+	// import cannot apply removals, so a moved stamp is reported as a warning.
 	cursorRemovedMovies = "simkl.inbound.movies.removed_from_list"
 	cursorRemovedShows  = "simkl.inbound.shows.removed_from_list"
 	cursorRemovedAnime  = "simkl.inbound.anime.removed_from_list"
+
+	cursorDroppedShows = "simkl.dropped.shows"
+	cursorDroppedAnime = "simkl.dropped.anime"
+)
+
+// Import warnings, worded as the built-in provider worded them.
+const (
+	warnRemovedFromList     = "simkl removed_from_list changed; removals are not imported"
+	warnWatchedMovieNoID    = "simkl watched movie skipped because it has no usable external id"
+	warnWatchedEpisodeNoID  = "simkl watched episode skipped because it has no usable external id path"
+	warnPlaybackMovieNoID   = "simkl playback movie skipped because it has no usable external id"
+	warnPlaybackEpisodeNoID = "simkl playback episode skipped because it has no usable external id path"
 )
 
 // What a traversal step reads.
@@ -37,6 +48,7 @@ const (
 	readWatchlistMovies = "watchlist_movies"
 	readWatchlistShows  = "watchlist_shows"
 	readRatings         = "ratings"
+	readDropped         = "dropped"
 )
 
 // maxProgressPercent keeps a resume point inside the contract's [0, 100)
@@ -61,6 +73,7 @@ type stepRead struct {
 	rows      []*pluginv1.WatchSyncRemoteState
 	complete  bool
 	animeRows bool
+	warnings  []string
 }
 
 type watchedBucket struct {
@@ -115,14 +128,16 @@ func (s *Server) planTraversal(ctx context.Context, acct account, kind pluginv1.
 		if fault != nil {
 			return nil, fault
 		}
-		for key, activity := range map[string]string{
-			cursorRemovedMovies: activities.Movies.RemovedFromList,
-			cursorRemovedShows:  activities.TVShows.RemovedFromList,
-			cursorRemovedAnime:  activities.Anime.RemovedFromList,
+		for _, removed := range []struct{ key, activity string }{
+			{cursorRemovedMovies, activities.Movies.RemovedFromList},
+			{cursorRemovedShows, activities.TVShows.RemovedFromList},
+			{cursorRemovedAnime, activities.Anime.RemovedFromList},
 		} {
-			if activity != "" {
-				token.Next[key] = activity
+			if removed.activity == "" || previous[removed.key] == removed.activity {
+				continue
 			}
+			token.warn(warnRemovedFromList)
+			token.Next[removed.key] = removed.activity
 		}
 		for _, bucket := range watchedBuckets(activities) {
 			last := previous[bucket.cursorKey]
@@ -178,10 +193,49 @@ func (s *Server) planTraversal(ctx context.Context, acct account, kind pluginv1.
 				}
 			}
 		}
+	case pluginv1.WatchSyncRemoteStateKind_WATCH_SYNC_REMOTE_STATE_KIND_DROPPED:
+		activities, fault := s.activities(ctx, acct)
+		if fault != nil {
+			return nil, fault
+		}
+		planDropped(token, activities, previous)
 	default:
 		return nil, invalidRequestFault("Simkl does not support the requested state family")
 	}
 	return token, nil
+}
+
+// planDropped plans the dropped-shows read. It checks each list's "all" stamp
+// rather than its "dropped" one, so a show moved out of the dropped list is
+// never missed. While neither stamp moved, the read is skipped and is no
+// snapshot. Otherwise both lists are read in full, never with date_from, which
+// could not show an undrop, so the read is the account's complete dropped set.
+func planDropped(token *pageToken, activities simklActivities, previous map[string]string) {
+	stamps := []struct{ key, activity string }{
+		{cursorDroppedShows, activities.TVShows.All},
+		{cursorDroppedAnime, activities.Anime.All},
+	}
+	changed := false
+	for _, stamp := range stamps {
+		changed = changed || !shouldSkipSimklBucket(previous[stamp.key], stamp.activity)
+	}
+	if !changed {
+		return
+	}
+	// Like the built-in provider, a read records both stamps as they are, so
+	// a list without a stamp is read again on the next sync.
+	for _, stamp := range stamps {
+		if stamp.activity == "" {
+			delete(token.Next, stamp.key)
+			continue
+		}
+		token.Next[stamp.key] = stamp.activity
+	}
+	token.Complete = true
+	token.Steps = []step{
+		{Read: readDropped, Path: "/sync/all-items/shows/dropped?extended=full"},
+		{Read: readDropped, Path: "/sync/all-items/anime/dropped?extended=full"},
+	}
 }
 
 // progressSteps plans the playback reads and records the stamps they settle
@@ -237,14 +291,15 @@ func (s *Server) readStep(ctx context.Context, acct account, current step) (step
 		if fault := s.simkl.get(ctx, acct, current.Path, &payload); fault != nil {
 			return stepRead{}, fault
 		}
-		return stepRead{rows: watchedStatesFromAllItems(payload, current.Fallback)}, nil
+		rows, warnings := watchedStatesFromAllItems(payload, current.Fallback)
+		return stepRead{rows: rows, warnings: warnings}, nil
 	case readProgress:
 		var payload []simklPlayback
 		if fault := s.simkl.get(ctx, acct, current.Path, &payload); fault != nil {
 			return stepRead{}, fault
 		}
-		rows, animeRows := progressStatesFromPlayback(payload)
-		return stepRead{rows: rows, animeRows: animeRows}, nil
+		rows, animeRows, warnings := progressStatesFromPlayback(payload)
+		return stepRead{rows: rows, animeRows: animeRows, warnings: warnings}, nil
 	case readWatchlistMovies, readWatchlistShows:
 		var payload simklAllItemsResponse
 		if fault := s.simkl.get(ctx, acct, current.Path, &payload); fault != nil {
@@ -252,11 +307,17 @@ func (s *Server) readStep(ctx context.Context, acct account, current step) (step
 		}
 		return stepRead{rows: watchlistStates(payload)}, nil
 	case readRatings:
-		rows, complete, fault := s.readRatings(ctx, acct)
+		rows, complete, warnings, fault := s.readRatings(ctx, acct)
 		if fault != nil {
 			return stepRead{}, fault
 		}
-		return stepRead{rows: rows, complete: complete}, nil
+		return stepRead{rows: rows, complete: complete, warnings: warnings}, nil
+	case readDropped:
+		var payload simklAllItemsResponse
+		if fault := s.simkl.get(ctx, acct, current.Path, &payload); fault != nil {
+			return stepRead{}, fault
+		}
+		return stepRead{rows: droppedStates(payload)}, nil
 	default:
 		return stepRead{}, invalidRequestFault("Simkl page token is invalid")
 	}
@@ -296,9 +357,9 @@ func oldestCursor(values ...string) string {
 
 // watchedStatesFromAllItems maps an all-items read to watched movies and
 // episodes. Simkl reports the last watch only, so each title counts one play.
-// Rows without a usable id are skipped.
-func watchedStatesFromAllItems(payload simklAllItemsResponse, allowShowTimestampFallback bool) []*pluginv1.WatchSyncRemoteState {
-	states := make([]*pluginv1.WatchSyncRemoteState, 0, len(payload.Movies))
+// Rows without a usable id are skipped with a warning each.
+func watchedStatesFromAllItems(payload simklAllItemsResponse, allowShowTimestampFallback bool) (states []*pluginv1.WatchSyncRemoteState, warnings []string) {
+	states = make([]*pluginv1.WatchSyncRemoteState, 0, len(payload.Movies))
 	for _, movie := range payload.Movies {
 		if movie.Status != "" && movie.Status != "completed" {
 			continue
@@ -308,6 +369,7 @@ func watchedStatesFromAllItems(payload simklAllItemsResponse, allowShowTimestamp
 		}
 		key := movieKey(movie.Movie.IDs)
 		if key == "" {
+			warnings = append(warnings, warnWatchedMovieNoID)
 			continue
 		}
 		states = append(states, &pluginv1.WatchSyncRemoteState{
@@ -330,6 +392,7 @@ func watchedStatesFromAllItems(payload simklAllItemsResponse, allowShowTimestamp
 					seasonNumber, number := episodeNumbers(episode, season.Number)
 					key := episodeKey(show.Show.IDs, seasonNumber, number, episode.IDs)
 					if key == "" {
+						warnings = append(warnings, warnWatchedEpisodeNoID)
 						continue
 					}
 					media := episodeMedia(show.Show, episode.Title, seasonNumber, number)
@@ -343,13 +406,14 @@ func watchedStatesFromAllItems(payload simklAllItemsResponse, allowShowTimestamp
 			}
 		}
 	}
-	return states
+	return states, warnings
 }
 
 // progressStatesFromPlayback maps paused playback. animeRows reports whether
 // any row came from an anime title. Episode rows carry the show's ids only,
-// as the built-in provider's did.
-func progressStatesFromPlayback(payload []simklPlayback) (states []*pluginv1.WatchSyncRemoteState, animeRows bool) {
+// as the built-in provider's did. Rows without a usable id are skipped with a
+// warning each.
+func progressStatesFromPlayback(payload []simklPlayback) (states []*pluginv1.WatchSyncRemoteState, animeRows bool, warnings []string) {
 	states = make([]*pluginv1.WatchSyncRemoteState, 0, len(payload))
 	for _, item := range payload {
 		progress := &pluginv1.WatchSyncRemoteProgressState{
@@ -360,6 +424,7 @@ func progressStatesFromPlayback(payload []simklPlayback) (states []*pluginv1.Wat
 		case "movie":
 			key := movieKey(item.Movie.IDs)
 			if key == "" {
+				warnings = append(warnings, warnPlaybackMovieNoID)
 				continue
 			}
 			states = append(states, &pluginv1.WatchSyncRemoteState{
@@ -376,6 +441,7 @@ func progressStatesFromPlayback(payload []simklPlayback) (states []*pluginv1.Wat
 			season, episode := episodeNumbers(item.Episode, 0)
 			key := episodeKey(show.IDs, season, episode, item.Episode.IDs)
 			if key == "" {
+				warnings = append(warnings, warnPlaybackEpisodeNoID)
 				continue
 			}
 			states = append(states, &pluginv1.WatchSyncRemoteState{
@@ -385,7 +451,7 @@ func progressStatesFromPlayback(payload []simklPlayback) (states []*pluginv1.Wat
 			})
 		}
 	}
-	return states, animeRows
+	return states, animeRows, warnings
 }
 
 // watchlistStates maps a plan-to-watch read. Movies are movies; shows and
@@ -412,13 +478,29 @@ func watchlistStates(payload simklAllItemsResponse) []*pluginv1.WatchSyncRemoteS
 			}
 			states = append(states, &pluginv1.WatchSyncRemoteState{
 				ProviderItemKey: key,
-				Media: &pluginv1.WatchSyncMedia{
-					MediaType:   pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES,
-					Title:       show.Show.Title,
-					Year:        int32(show.Show.Year),
-					ExternalIds: externalIDs(show.Show.IDs),
-				},
-				Watchlist: &pluginv1.WatchSyncRemoteListState{},
+				Media:           seriesMedia(show.Show),
+				Watchlist:       &pluginv1.WatchSyncRemoteListState{},
+			})
+		}
+	}
+	return states
+}
+
+// droppedStates maps a dropped-list read of shows or anime to dropped series.
+// Simkl records no time a show was dropped, so listed_at is left for the host
+// to fill in. Like the built-in provider, a show without any id is skipped.
+func droppedStates(payload simklAllItemsResponse) []*pluginv1.WatchSyncRemoteState {
+	var states []*pluginv1.WatchSyncRemoteState
+	for _, shows := range [][]simklShowItem{payload.Shows, payload.Anime} {
+		for _, show := range shows {
+			key := showKey(show.Show.IDs)
+			if key == "" {
+				continue
+			}
+			states = append(states, &pluginv1.WatchSyncRemoteState{
+				ProviderItemKey: key,
+				Media:           seriesMedia(show.Show),
+				Dropped:         &pluginv1.WatchSyncRemoteListState{},
 			})
 		}
 	}
@@ -431,6 +513,15 @@ func movieMedia(movie simklMovie) *pluginv1.WatchSyncMedia {
 		Title:       movie.Title,
 		Year:        int32(movie.Year),
 		ExternalIds: externalIDs(movie.IDs),
+	}
+}
+
+func seriesMedia(show simklShow) *pluginv1.WatchSyncMedia {
+	return &pluginv1.WatchSyncMedia{
+		MediaType:   pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES,
+		Title:       show.Title,
+		Year:        int32(show.Year),
+		ExternalIds: externalIDs(show.IDs),
 	}
 }
 

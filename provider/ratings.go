@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -38,11 +39,10 @@ const (
 	// whole library, unrated items included.
 	simklEveryRating = "1,2,3,4,5,6,7,8,9,10"
 
-	// Rating a released movie that is not on the user's Simkl list files it
-	// as completed, which records a watch. The built-in provider sent a movie
-	// rating only once the profile had a completed play; this plugin cannot
-	// check that yet, so it does not send new movie ratings at all.
-	movieRatingHeldMessage = "Simkl movie ratings are not sent yet, because Simkl records a rated movie as watched"
+	// A traversal is a complete snapshot of both kinds or of neither, so
+	// either warning means no rating removal of either kind is imported.
+	warnUntypedAnimeRating = "simkl returned rated anime without a movie or tv type; skipped movie and series rating removals"
+	warnRatingNoIDFormat   = "simkl %s rating skipped because it has no usable id; skipped movie and series rating removals"
 )
 
 // simklRatingsList is the reply to GET /sync/ratings/{type}/{rating}. Each
@@ -105,17 +105,17 @@ func ratingsChanged(previous, activity string) bool {
 // The built-in provider could declare movies and series complete separately.
 // A plugin traversal is complete for both kinds or neither, so the rows are a
 // complete snapshot only when the built-in would have declared both kinds.
-func (s *Server) readRatings(ctx context.Context, acct account) ([]*pluginv1.WatchSyncRemoteState, bool, *pluginv1.WatchSyncFault) {
-	var states []*pluginv1.WatchSyncRemoteState
+func (s *Server) readRatings(ctx context.Context, acct account) (states []*pluginv1.WatchSyncRemoteState, complete bool, warnings []string, fault *pluginv1.WatchSyncFault) {
 	anyUntyped := false
 	skipped := make(map[pluginv1.WatchSyncMediaType]bool)
 	for _, listType := range []string{simklTypeMovies, simklTypeShows, simklTypeAnime} {
 		var list simklRatingsList
 		if fault := s.simkl.get(ctx, acct, "/sync/ratings/"+listType+"/"+simklEveryRating, &list); fault != nil {
-			return nil, false, fault
+			return nil, false, nil, fault
 		}
-		rows, untyped, skippedKinds := ratingStatesFromList(list, listType)
+		rows, untyped, skippedKinds, listWarnings := ratingStatesFromList(list, listType)
 		states = append(states, rows...)
+		warnings = append(warnings, listWarnings...)
 		anyUntyped = anyUntyped || untyped
 		for kind := range skippedKinds {
 			skipped[kind] = true
@@ -125,17 +125,21 @@ func (s *Server) readRatings(ctx context.Context, acct account) ([]*pluginv1.Wat
 	// may be an anime movie, which the movie read never returns. The movie read
 	// is then not provably complete. A rated entry skipped for lack of an id
 	// is a title the read did not return, so its kind is not complete either.
-	complete := !anyUntyped &&
+	if anyUntyped {
+		warnings = append(warnings, warnUntypedAnimeRating)
+	}
+	complete = !anyUntyped &&
 		!skipped[pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE] &&
 		!skipped[pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES]
-	return states, complete, nil
+	return states, complete, warnings, nil
 }
 
 // ratingStatesFromList maps one ratings read. listType is the type the read
 // asked for; only that key of the reply is used. untyped reports a rated anime
 // entry whose anime_type names neither a movie nor a series. skippedKinds holds
-// the kind of each rated entry skipped for lack of a usable id.
-func ratingStatesFromList(list simklRatingsList, listType string) (states []*pluginv1.WatchSyncRemoteState, untyped bool, skippedKinds map[pluginv1.WatchSyncMediaType]bool) {
+// the kind of each rated entry skipped for lack of a usable id, and warnings
+// has one warning per such entry.
+func ratingStatesFromList(list simklRatingsList, listType string) (states []*pluginv1.WatchSyncRemoteState, untyped bool, skippedKinds map[pluginv1.WatchSyncMediaType]bool, warnings []string) {
 	var items []simklRatedItem
 	switch listType {
 	case simklTypeMovies:
@@ -173,6 +177,7 @@ func ratingStatesFromList(list simklRatingsList, listType string) (states []*plu
 		}
 		if key == "" {
 			skippedKinds[kind] = true
+			warnings = append(warnings, fmt.Sprintf(warnRatingNoIDFormat, kindName(kind)))
 			continue
 		}
 		rating := &pluginv1.WatchSyncRemoteRatingState{Rating: int32(min(max(math.Round(*item.UserRating), 1), 10))}
@@ -190,7 +195,16 @@ func ratingStatesFromList(list simklRatingsList, listType string) (states []*plu
 			Rating: rating,
 		})
 	}
-	return states, untyped, skippedKinds
+	return states, untyped, skippedKinds, warnings
+}
+
+// kindName names a rateable media type the way the built-in provider's
+// warnings did.
+func kindName(kind pluginv1.WatchSyncMediaType) string {
+	if kind == pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE {
+		return "movie"
+	}
+	return "series"
 }
 
 // typedAnime reports whether an anime_type names a Silo kind outright.
@@ -244,9 +258,15 @@ type ratingRef struct {
 	ids     simklIDs
 }
 
-// setRatings sets series ratings in one batch. Simkl overwrites an existing
-// rating, so resending one is harmless. Movie ratings are held back; see
-// movieRatingHeldMessage.
+// setRatings sets movie and series ratings in one batch. Simkl overwrites an
+// existing rating, so resending one is harmless.
+//
+// Rating a released movie that is not on the user's Simkl list files it as
+// completed, which records it as watched, so the manifest lists movies in
+// rating_export_requires_watched and the host sends a movie rating only after
+// the profile has watched the movie. Rating an unlisted show files it as
+// watching with no episodes marked, except that a single-episode show is filed
+// as completed; series are not held back for that case.
 func (s *Server) setRatings(ctx context.Context, acct account, events []*pluginv1.WatchSyncEvent, results map[string]*pluginv1.WatchSyncApplyResult) *pluginv1.WatchSyncFault {
 	var payload simklRatingsPayload
 	refs := make([]ratingRef, 0, len(events))
@@ -257,12 +277,7 @@ func (s *Server) setRatings(ctx context.Context, acct account, events []*pluginv
 			continue
 		}
 		kind := event.GetMedia().GetMediaType()
-		switch kind {
-		case pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES:
-		case pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE:
-			results[id] = retry(id, temporaryFault(movieRatingHeldMessage))
-			continue
-		default:
+		if !rateable(kind) {
 			results[id] = rejected(id, invalidRequestFault("Simkl rates movies and series only"))
 			continue
 		}
@@ -275,7 +290,7 @@ func (s *Server) setRatings(ctx context.Context, acct account, events []*pluginv
 		if ratedAt := event.GetOccurredAt(); ratedAt != nil && ratedAt.CheckValid() == nil && !ratedAt.AsTime().IsZero() {
 			entry.RatedAt = ratedAt.AsTime().UTC().Format(time.RFC3339)
 		}
-		payload.Shows = append(payload.Shows, entry)
+		payload.add(kind, entry)
 		refs = append(refs, ratingRef{eventID: id, kind: kind, ids: ids})
 	}
 	return s.sendRatings(ctx, acct, "/sync/ratings", payload, refs, notFoundResult, results)
@@ -290,24 +305,33 @@ func (s *Server) removeRatings(ctx context.Context, acct account, events []*plug
 	for _, event := range events {
 		id := event.GetEventId()
 		kind := event.GetMedia().GetMediaType()
-		ids := localItemIDs(event)
-		entry := simklRatingItem{IDs: ids}
-		switch {
-		case kind != pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE && kind != pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES:
+		if !rateable(kind) {
 			results[id] = rejected(id, invalidRequestFault("Simkl rates movies and series only"))
 			continue
-		case ids == (simklIDs{}):
+		}
+		ids := localItemIDs(event)
+		if ids == (simklIDs{}) {
 			// Simkl cannot hold a rating for a title it could never match.
 			results[id] = noChange(id)
 			continue
-		case kind == pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE:
-			payload.Movies = append(payload.Movies, entry)
-		default:
-			payload.Shows = append(payload.Shows, entry)
 		}
+		payload.add(kind, simklRatingItem{IDs: ids})
 		refs = append(refs, ratingRef{eventID: id, kind: kind, ids: ids})
 	}
 	return s.sendRatings(ctx, acct, "/sync/ratings/remove", payload, refs, noChange, results)
+}
+
+func rateable(kind pluginv1.WatchSyncMediaType) bool {
+	return kind == pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE || kind == pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES
+}
+
+// add appends entry under its kind, a movie or a series.
+func (payload *simklRatingsPayload) add(kind pluginv1.WatchSyncMediaType, entry simklRatingItem) {
+	if kind == pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE {
+		payload.Movies = append(payload.Movies, entry)
+		return
+	}
+	payload.Shows = append(payload.Shows, entry)
 }
 
 // sendRatings posts a ratings payload and maps the reply back to refs, the

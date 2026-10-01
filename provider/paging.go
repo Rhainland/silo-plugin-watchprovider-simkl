@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -29,9 +30,9 @@ import (
 // Resuming by key is safe for watched and progress reads: they are deltas, and
 // a row that changes during the traversal moves the list's activity past the
 // stamp the cursor records, so the next traversal reads it again. A snapshot
-// (the watchlist, or a complete ratings read) must not miss a row, so a
-// re-read of a snapshot list must match the first read exactly, or the
-// traversal fails as temporary and the next sync starts over.
+// (the watchlist, the dropped lists, or a complete ratings read) must not
+// miss a row, so a re-read of a snapshot list must match the first read
+// exactly, or the traversal fails as temporary and the next sync starts over.
 const (
 	defaultPageSize = 100
 	maxPageSize     = 100
@@ -66,6 +67,9 @@ type pageToken struct {
 	// Fingerprint identifies the first read of Steps[0], to detect a changed
 	// snapshot list on a re-read.
 	Fingerprint string `json:"fingerprint,omitempty"`
+	// Warnings counts each import warning of the traversal so far. The final
+	// page returns them.
+	Warnings map[string]int `json:"warnings,omitempty"`
 
 	carried []*pluginv1.WatchSyncRemoteState
 }
@@ -116,6 +120,7 @@ func (s *Server) listState(ctx context.Context, acct account, kind pluginv1.Watc
 	response := &pluginv1.WatchSyncListRemoteStateResponse{Items: items, CompleteSnapshot: token.Complete}
 	if len(token.Steps) == 0 {
 		response.NextCursor = encodeCursor(token.Next)
+		response.Warnings = token.warningMessages()
 		return response
 	}
 	encoded, err := token.encode()
@@ -139,6 +144,7 @@ func (s *Server) loadStep(ctx context.Context, acct account, token *pageToken, e
 	if !token.Started {
 		token.Started = true
 		token.Fingerprint = fingerprint
+		token.warn(result.warnings...)
 		if current.Read == readRatings {
 			token.Complete = result.complete
 		}
@@ -182,6 +188,37 @@ func (s *Server) loadStep(ctx context.Context, acct account, token *pageToken, e
 	token.carried = rows[start:end]
 	token.More = end < len(rows)
 	return nil
+}
+
+// warn records import warnings for the traversal's final page. A re-read of
+// an oversized list reports nothing new, so only a step's first read warns.
+func (t *pageToken) warn(messages ...string) {
+	if len(messages) == 0 {
+		return
+	}
+	if t.Warnings == nil {
+		t.Warnings = make(map[string]int)
+	}
+	for _, message := range messages {
+		t.Warnings[message]++
+	}
+}
+
+// warningMessages returns each recorded warning once, sorted. A repeated one
+// reads "message (n items)", the way the host summarizes a run's repeated
+// warnings, so a library with many skipped titles shows the count the
+// built-in provider's run showed, unaffected by the host's cap on warnings
+// per traversal.
+func (t *pageToken) warningMessages() []string {
+	var messages []string
+	for message, count := range t.Warnings {
+		if count > 1 {
+			message = fmt.Sprintf("%s (%d items)", message, count)
+		}
+		messages = append(messages, message)
+	}
+	slices.Sort(messages)
+	return messages
 }
 
 func (t *pageToken) handedOut(key string) {

@@ -1,6 +1,6 @@
 {
   "plugin_id": "silo.watchprovider.simkl",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "supported_platforms": [
@@ -34,7 +34,7 @@
       "type": "watch_sync_provider.v1",
       "id": "simkl",
       "display_name": "Simkl",
-      "description": "Two-way watch history, plan-to-watch list, and series ratings, plus resume progress, movie ratings import, and live scrobbling for Simkl, anime included.",
+      "description": "Two-way watch history, plan-to-watch list, dropped shows, and ratings, plus resume progress and live scrobbling for Simkl, anime included.",
       "watch_sync_provider": {
         "auth_methods": ["WATCH_SYNC_AUTH_METHOD_DEVICE_CODE"],
         "import_watched": true,
@@ -47,6 +47,8 @@
         "scrobble_playback": true,
         "import_ratings": true,
         "export_ratings": true,
+        "sync_dropped": true,
+        "rating_export_requires_watched": ["WATCH_SYNC_MEDIA_TYPE_MOVIE"],
         "supported_media_types": [
           "WATCH_SYNC_MEDIA_TYPE_MOVIE",
           "WATCH_SYNC_MEDIA_TYPE_EPISODE",
@@ -60,8 +62,8 @@
   "category": "Watch Providers",
   "presentation": {
     "display_name": "Simkl Watch Provider",
-    "summary": "Sync Silo watch history, plan-to-watch list, and ratings with Simkl.",
-    "description_markdown": "Imports watched movies and episodes, resume progress, the plan-to-watch list, and movie and series ratings from Simkl, anime included. Exports watched and unwatched titles, plan-to-watch changes, and series ratings, and forwards live playback start, pause, and stop events.",
+    "summary": "Sync Silo watch history, plan-to-watch list, dropped shows, and ratings with Simkl.",
+    "description_markdown": "Imports watched movies and episodes, resume progress, the plan-to-watch list, dropped shows, and movie and series ratings from Simkl, anime included. Exports watched and unwatched titles, plan-to-watch changes, dropped shows, and ratings, and forwards live playback start, pause, and stop events. A movie rating is sent once the profile has watched the movie.",
     "setup_markdown": "Create an app at [simkl.com/settings/developer](https://simkl.com/settings/developer/) and enter its client ID in this plugin's settings. Then connect each Silo profile from its watch-provider settings: Silo shows a PIN code to enter at simkl.com/pin.",
     "homepage_url": "https://simkl.com",
     "source_url": "https://github.com/Silo-Server/silo-plugin-watchprovider-simkl",

@@ -162,7 +162,8 @@ func (s *Server) remotePlays(ctx context.Context, acct account, movies, episodes
 		if fault := s.simkl.get(ctx, acct, bucket.path, &payload); fault != nil {
 			return nil, fault
 		}
-		for _, state := range watchedStatesFromAllItems(payload, bucket.allowShowTimestampFallback) {
+		states, _ := watchedStatesFromAllItems(payload, bucket.allowShowTimestampFallback)
+		for _, state := range states {
 			watchedAt := state.GetWatched().GetLastWatchedAt()
 			if watchedAt == nil {
 				continue

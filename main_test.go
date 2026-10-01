@@ -13,7 +13,7 @@ func TestManifestDeclaresTheSimklProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
-	if parsed.GetPluginId() != "silo.watchprovider.simkl" || parsed.GetVersion() != "0.1.0" {
+	if parsed.GetPluginId() != "silo.watchprovider.simkl" || parsed.GetVersion() != "0.2.0" {
 		t.Fatalf("plugin = %q %q", parsed.GetPluginId(), parsed.GetVersion())
 	}
 	capabilities := parsed.GetCapabilities()
@@ -42,8 +42,14 @@ func TestManifestAdvertisesTheBuiltInCapabilities(t *testing.T) {
 	}
 	if !descriptor.GetImportWatched() || !descriptor.GetImportProgress() || !descriptor.GetExportWatched() || !descriptor.GetExportUnwatched() ||
 		!descriptor.GetImportWatchlist() || !descriptor.GetExportWatchlist() || !descriptor.GetRemoveWatchlist() ||
-		!descriptor.GetScrobblePlayback() || !descriptor.GetImportRatings() || !descriptor.GetExportRatings() {
+		!descriptor.GetScrobblePlayback() || !descriptor.GetImportRatings() || !descriptor.GetExportRatings() || !descriptor.GetSyncDropped() {
 		t.Fatalf("descriptor = %v, want the built-in provider's capabilities", descriptor)
+	}
+	// Rating a movie on Simkl files it as watched, so the host must hold a
+	// movie rating until the profile watched the movie, as it did for the
+	// built-in provider. Series ratings are not held back.
+	if gated := descriptor.GetRatingExportRequiresWatched(); len(gated) != 1 || gated[0] != pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE {
+		t.Fatalf("rating_export_requires_watched = %v, want movies only", gated)
 	}
 	if descriptor.GetImportFavorites() || descriptor.GetExportFavorites() || descriptor.GetRemoveFavorites() || descriptor.GetProvidesWatchlistOrder() {
 		t.Fatalf("descriptor = %v advertises favorites or watchlist order", descriptor)

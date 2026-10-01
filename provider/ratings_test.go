@@ -207,7 +207,7 @@ func TestRatingStatesFromListClassifiesAnimeByType(t *testing.T) {
 			if err := json.Unmarshal([]byte(body), &list); err != nil {
 				t.Fatalf("decode: %v", err)
 			}
-			states, untyped, skipped := ratingStatesFromList(list, simklTypeAnime)
+			states, untyped, skipped, _ := ratingStatesFromList(list, simklTypeAnime)
 			if len(states) != 1 || len(skipped) != 0 {
 				t.Fatalf("states = %v skipped = %v, want one row", states, skipped)
 			}
@@ -233,7 +233,7 @@ func TestRatingStatesFromListUntypedAnimeWithOnlyTMDBHasNoExternalID(t *testing.
 	]}`), &list); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	states, _, skipped := ratingStatesFromList(list, simklTypeAnime)
+	states, _, skipped, warnings := ratingStatesFromList(list, simklTypeAnime)
 	// The OVA keeps only its Simkl id; the untyped entry has no id left.
 	if len(states) != 1 {
 		t.Fatalf("states = %v", states)
@@ -243,6 +243,9 @@ func TestRatingStatesFromListUntypedAnimeWithOnlyTMDBHasNoExternalID(t *testing.
 	}
 	if !reflect.DeepEqual(skipped, map[pluginv1.WatchSyncMediaType]bool{pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES: true}) {
 		t.Fatalf("skipped kinds = %v, want series for the untyped entry", skipped)
+	}
+	if want := []string{"simkl series rating skipped because it has no usable id; skipped movie and series rating removals"}; !reflect.DeepEqual(warnings, want) {
+		t.Fatalf("warnings = %v, want %v", warnings, want)
 	}
 }
 
@@ -255,7 +258,7 @@ func TestRatingStatesRoundAndClampToTheContractScale(t *testing.T) {
 	]}`), &list); err != nil {
 		t.Fatal(err)
 	}
-	states, _, _ := ratingStatesFromList(list, simklTypeMovies)
+	states, _, _, _ := ratingStatesFromList(list, simklTypeMovies)
 	got := map[string]int32{}
 	for _, state := range states {
 		got[state.GetProviderItemKey()] = state.GetRating().GetRating()
@@ -308,6 +311,35 @@ func TestListRatingsIsNotASnapshotWhenAnyKindIsUnproven(t *testing.T) {
 	}
 }
 
+func TestListRatingsWarnsAboutRatingsItCannotProve(t *testing.T) {
+	fake := &ratingsServer{t: t, activities: ratingsActivitiesFixture, lists: map[string]string{
+		"movies": `{"movies":[
+			{"user_rating":4,"movie":{"title":"No IDs","ids":{}}},
+			{"user_rating":5,"movie":{"title":"No IDs either","ids":{}}},
+			{"user_rating":6,"movie":{"title":"Heat","ids":{"imdb":"tt0113277"}}}
+		]}`,
+		"shows": `{"shows":[{"user_rating":6,"show":{"title":"No IDs","ids":{}}}]}`,
+		"anime": `{"anime":[{"user_rating":8,"show":{"title":"Akira","year":1988,"ids":{"simkl":3,"imdb":"tt0094625"}}}]}`,
+	}}
+	result := listRatingsFrom(t, fake, nil)
+	want := []string{
+		"simkl movie rating skipped because it has no usable id; skipped movie and series rating removals (2 items)",
+		"simkl returned rated anime without a movie or tv type; skipped movie and series rating removals",
+		"simkl series rating skipped because it has no usable id; skipped movie and series rating removals",
+	}
+	if !reflect.DeepEqual(result.warnings, want) {
+		t.Fatalf("warnings = %q, want %q", result.warnings, want)
+	}
+	if result.complete || len(result.items) != 2 {
+		t.Fatalf("result = %+v, want the two usable ratings in an incomplete read", result)
+	}
+
+	clean := listRatingsFrom(t, &ratingsServer{t: t, activities: ratingsActivitiesFixture}, nil)
+	if len(clean.warnings) != 0 || !clean.complete {
+		t.Fatalf("clean read = %+v, want a complete read without warnings", clean)
+	}
+}
+
 // ratingsWriteServer records one POST body and answers with response.
 func ratingsWriteServer(t *testing.T, wantPath, response string, got any, calls *int) *Server {
 	t.Helper()
@@ -339,42 +371,38 @@ const (
 	mediaEpisode = pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_EPISODE
 )
 
-func TestSetRatingsSendsSeriesInOneBatchAndHoldsMovieRatings(t *testing.T) {
+func TestSetRatingsSendsMoviesAndSeriesInOneBatch(t *testing.T) {
 	var got map[string][]map[string]any
 	var calls int
-	server := ratingsWriteServer(t, "/sync/ratings", `{"added":{"movies":0,"shows":2},"not_found":{"movies":[],"shows":[]}}`, &got, &calls)
-	dated := ratingEvent("s2", mediaSeries, opSetRating, 6, "imdb:tt0306414", map[string]string{"imdb": "tt0306414", "tmdb": "1438"})
-	dated.OccurredAt = timestamp(time.Date(2026, 4, 5, 6, 7, 8, 0, time.UTC))
-	response := applyEvents(t, server,
-		ratingEvent("m1", mediaMovie, opSetRating, 6, "imdb:tt0113277", map[string]string{"imdb": "tt0113277", "tmdb": "949"}),
+	server := ratingsWriteServer(t, "/sync/ratings", `{"added":{"movies":1,"shows":1},"not_found":{"movies":[],"shows":[]}}`, &got, &calls)
+	// The host sends a movie rating only after the profile watched the movie,
+	// so the plugin sends it like any other.
+	movie := ratingEvent("m1", mediaMovie, opSetRating, 6, "imdb:tt0113277", map[string]string{"imdb": "tt0113277", "tmdb": "949"})
+	movie.OccurredAt = timestamp(time.Date(2026, 4, 5, 6, 7, 8, 0, time.UTC))
+	results := resultsByID(applyEvents(t, server,
+		movie,
 		// An agreed row for a removed media item carries only its key.
 		ratingEvent("s1", mediaSeries, opSetRating, 8, "tvdb:79126", nil),
-		dated,
-		ratingEvent("no-ids", mediaSeries, opSetRating, 4, "", nil),
+		ratingEvent("no-ids", mediaMovie, opSetRating, 4, "", nil),
 		ratingEvent("episode", mediaEpisode, opSetRating, 4, "", map[string]string{"tvdb": "1"}),
-		ratingEvent("out-of-range", mediaSeries, opSetRating, 11, "", map[string]string{"imdb": "tt1"}),
-	)
+		ratingEvent("out-of-range", mediaMovie, opSetRating, 11, "", map[string]string{"imdb": "tt1"}),
+	))
 	if calls != 1 {
 		t.Fatalf("requests = %d, want one batch", calls)
 	}
-	if len(got) != 1 || len(got["shows"]) != 2 {
-		t.Fatalf("payload = %#v, want two shows and no movies", got)
+	movies, shows := got["movies"], got["shows"]
+	if len(movies) != 1 || movies[0]["rating"] != float64(6) || movies[0]["rated_at"] != "2026-04-05T06:07:08Z" ||
+		!reflect.DeepEqual(movies[0]["ids"], map[string]any{"imdb": "tt0113277", "tmdb": float64(949)}) {
+		t.Fatalf("movies payload = %#v", movies)
 	}
-	shows := got["shows"]
-	if shows[0]["rating"] != float64(8) || shows[0]["rated_at"] != nil || !reflect.DeepEqual(shows[0]["ids"], map[string]any{"tvdb": float64(79126)}) {
-		t.Fatalf("first show = %#v", shows[0])
+	if len(shows) != 1 || shows[0]["rating"] != float64(8) || shows[0]["rated_at"] != nil ||
+		!reflect.DeepEqual(shows[0]["ids"], map[string]any{"tvdb": float64(79126)}) {
+		t.Fatalf("shows payload = %#v", shows)
 	}
-	if shows[1]["rating"] != float64(6) || shows[1]["rated_at"] != "2026-04-05T06:07:08Z" ||
-		!reflect.DeepEqual(shows[1]["ids"], map[string]any{"imdb": "tt0306414", "tmdb": float64(1438)}) {
-		t.Fatalf("second show = %#v", shows[1])
+	if len(got) != 2 {
+		t.Fatalf("payload keys = %#v, want movies and shows only", got)
 	}
-	results := resultsByID(response)
-	held := results["m1"]
-	if held.GetStatus() != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_RETRY ||
-		held.GetFault().GetCode() != pluginv1.WatchSyncFaultCode_WATCH_SYNC_FAULT_CODE_TEMPORARY || held.GetFault().GetSafeMessage() != movieRatingHeldMessage {
-		t.Fatalf("movie rating = %v, want held back", held)
-	}
-	for _, id := range []string{"s1", "s2"} {
+	for _, id := range []string{"m1", "s1"} {
 		if results[id].GetStatus() != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED {
 			t.Fatalf("%s = %v", id, results[id])
 		}
@@ -391,8 +419,8 @@ func TestSetRatingsSkipsRequestWithoutUsableItems(t *testing.T) {
 	var calls int
 	server := ratingsWriteServer(t, "/sync/ratings", `{}`, &got, &calls)
 	response := applyEvents(t, server,
-		ratingEvent("no-ids", mediaSeries, opSetRating, 4, "", nil),
-		ratingEvent("movie", mediaMovie, opSetRating, 4, "", map[string]string{"imdb": "tt1"}),
+		ratingEvent("no-ids", mediaMovie, opSetRating, 4, "", nil),
+		ratingEvent("no-ids-series", mediaSeries, opSetRating, 4, "", nil),
 	)
 	if calls != 0 || response.GetFault() != nil {
 		t.Fatalf("calls = %d response = %v, want no request", calls, response)
@@ -402,24 +430,47 @@ func TestSetRatingsSkipsRequestWithoutUsableItems(t *testing.T) {
 func TestSetRatingsMapsNotFoundByAnySharedIDOfTheSameKind(t *testing.T) {
 	var got any
 	var calls int
-	// The show echo carries only the IMDb id; a movie echo's TMDB id equals a
-	// series' TMDB id, which must not match.
+	// The movie echo carries only the TMDB id, the show echo only the IMDb id,
+	// and a show echo's TMDB id equals a movie's TMDB id, which must not match.
 	server := ratingsWriteServer(t, "/sync/ratings", `{
-		"added":{"movies":0,"shows":1,"statuses":[]},
+		"added":{"movies":1,"shows":0,"statuses":[]},
 		"not_found":{
-			"movies":[{"rating":6,"ids":{"tmdb":"1438"},"type":"movie"}],
-			"shows":[{"rating":8,"ids":{"imdb":"tt0306414"},"type":"show"}]
+			"movies":[{"rating":6,"ids":{"tmdb":"949"},"type":"movie"}],
+			"shows":[{"rating":8,"ids":{"imdb":"tt0306414"},"type":"show"},{"rating":8,"ids":{"tmdb":1438},"type":"show"}]
 		}
 	}`, &got, &calls)
 	results := resultsByID(applyEvents(t, server,
+		ratingEvent("m1", mediaMovie, opSetRating, 6, "imdb:tt0113277", map[string]string{"imdb": "tt0113277", "tmdb": "949"}),
 		ratingEvent("s1", mediaSeries, opSetRating, 8, "tvdb:79126", map[string]string{"imdb": "tt0306414", "tvdb": "79126"}),
-		ratingEvent("s2", mediaSeries, opSetRating, 10, "tmdb:1438", map[string]string{"tmdb": "1438"}),
+		ratingEvent("m2", mediaMovie, opSetRating, 10, "tmdb:1438", map[string]string{"tmdb": "1438"}),
 	))
-	if results["s1"].GetStatus() != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_REJECTED {
-		t.Fatalf("s1 = %v, want not found", results["s1"])
+	for id, want := range map[string]pluginv1.WatchSyncApplyStatus{
+		"m1": pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_REJECTED,
+		"s1": pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_REJECTED,
+		"m2": pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED,
+	} {
+		if results[id].GetStatus() != want {
+			t.Fatalf("%s = %v, want %v", id, results[id], want)
+		}
 	}
-	if results["s2"].GetStatus() != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED {
-		t.Fatalf("s2 = %v, want applied", results["s2"])
+}
+
+func TestSetRatingsReportsEachEventByItsOwnKind(t *testing.T) {
+	var got any
+	var calls int
+	// A movie and a series share the key tmdb:550; only the series is echoed
+	// as not found.
+	server := ratingsWriteServer(t, "/sync/ratings", `{
+		"added":{"movies":1,"shows":0},
+		"not_found":{"movies":[],"shows":[{"rating":8,"ids":{"tmdb":550},"type":"show"}]}
+	}`, &got, &calls)
+	results := resultsByID(applyEvents(t, server,
+		ratingEvent("movie", mediaMovie, opSetRating, 6, "tmdb:550", map[string]string{"tmdb": "550"}),
+		ratingEvent("series", mediaSeries, opSetRating, 8, "tmdb:550", map[string]string{"tmdb": "550"}),
+	))
+	if results["movie"].GetStatus() != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED ||
+		results["series"].GetStatus() != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_REJECTED {
+		t.Fatalf("results = %v, want the movie applied and the series not found", results)
 	}
 }
 

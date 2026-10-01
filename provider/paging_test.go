@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,6 +83,23 @@ func TestOversizedListIsReReadPerWindowAndResumesAfterTheLastRow(t *testing.T) {
 	requireEpisodes(t, result.items, 1, 350)
 	if reads.Load() < 3 || reads.Load() > 10 {
 		t.Fatalf("completed shows read %d times, want one read per window", reads.Load())
+	}
+}
+
+func TestWarningsAreCountedOncePerReadAcrossPagesAndReReads(t *testing.T) {
+	const unkeyed = `{"status":"completed","show":{"title":"No IDs","ids":{}},"seasons":[{"number":1,"episodes":[` +
+		`{"number":1,"watched_at":"2026-01-01T00:00:00Z"},{"number":2,"watched_at":"2026-01-01T00:00:00Z"}]}]}`
+	server, reads := pagingServer(t, func(int) string {
+		return strings.Replace(completedShows(1, 350), `{"shows":[`, `{"shows":[`+unkeyed+`,`, 1)
+	})
+	server.carryBudget = 50 * 130
+	result := listAll(t, server, kindWatched, "", 25)
+	requireEpisodes(t, result.items, 1, 350)
+	if reads.Load() < 3 {
+		t.Fatalf("completed shows read %d times, want several windows", reads.Load())
+	}
+	if want := []string{warnWatchedEpisodeNoID + " (2 items)"}; !reflect.DeepEqual(result.warnings, want) {
+		t.Fatalf("warnings = %q, want %q", result.warnings, want)
 	}
 }
 

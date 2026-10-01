@@ -201,6 +201,67 @@ func TestListWatchedReadsChangedListsFromTheirCursor(t *testing.T) {
 	}
 }
 
+func TestListWatchedWarnsWhenSimklRemovedTitlesFromAList(t *testing.T) {
+	fake := &fakeSimkl{t: t, bodies: map[string]string{
+		"/sync/activities": `{
+			"movies":{"completed":"2026-05-04T12:00:00Z","removed_from_list":"2026-05-03T00:00:00Z"},
+			"tv_shows":{"completed":"2026-05-04T12:10:00Z","removed_from_list":"2026-05-02T00:00:00Z"},
+			"anime":{"completed":"2026-05-04T12:20:00Z","removed_from_list":null}
+		}`,
+		"/sync/all-items/shows/watching": `{}`,
+		"/sync/all-items/anime/watching": `{}`,
+	}}
+	server, _ := newTestServer(t, fake)
+	cursor := map[string]string{
+		cursorInboundMoviesCompleted: "2026-05-04T12:00:00Z",
+		cursorInboundShowsCompleted:  "2026-05-04T12:10:00Z",
+		cursorInboundAnimeCompleted:  "2026-05-04T12:20:00Z",
+		cursorRemovedMovies:          "2026-05-01T00:00:00Z",
+		cursorRemovedShows:           "2026-05-02T00:00:00Z",
+	}
+	result := listAll(t, server, kindWatched, encodedCursor(t, cursor), 100)
+	if want := []string{warnRemovedFromList}; !reflect.DeepEqual(result.warnings, want) {
+		t.Fatalf("warnings = %q, want %q for the movie list only", result.warnings, want)
+	}
+	if got := decodedCursor(t, result.cursor); got[cursorRemovedMovies] != "2026-05-03T00:00:00Z" || got[cursorRemovedShows] != "2026-05-02T00:00:00Z" {
+		t.Fatalf("cursor = %v", got)
+	}
+
+	again := listAll(t, server, kindWatched, result.cursor, 100)
+	if len(again.warnings) != 0 {
+		t.Fatalf("warnings = %q, want none once the stamp is recorded", again.warnings)
+	}
+}
+
+func TestListWatchedAndProgressWarnAboutTitlesWithoutIDs(t *testing.T) {
+	fake := &fakeSimkl{t: t, bodies: map[string]string{
+		"/sync/activities": `{"movies":{"completed":"a","playback":"b"},"tv_shows":{"watching":"c","playback":"d"}}`,
+		"/sync/all-items/movies/completed": `{"movies":[
+			{"status":"completed","last_watched_at":"2026-05-04T12:00:00Z","movie":{"title":"No IDs","ids":{}}},
+			{"status":"completed","last_watched_at":"2026-05-04T12:00:00Z","movie":{"title":"No IDs either","ids":{"slug":"x"}}},
+			{"status":"completed","last_watched_at":"2026-05-04T12:00:00Z","movie":{"title":"Heat","ids":{"imdb":"tt0113277"}}}
+		]}`,
+		"/sync/all-items/shows/watching":  `{"shows":[{"status":"watching","show":{"title":"No IDs","ids":{}},"seasons":[{"number":1,"episodes":[{"number":1,"watched_at":"2026-05-04T13:00:00Z"}]}]}]}`,
+		"/sync/all-items/shows/completed": `{}`,
+		"/sync/all-items/anime/watching":  `{}`,
+		"/sync/all-items/anime/completed": `{}`,
+		"/sync/playback/movies":           `[{"type":"movie","progress":40,"paused_at":"2026-05-04T12:00:00Z","movie":{"title":"No IDs","ids":{}}}]`,
+		"/sync/playback/episodes":         `[{"type":"episode","progress":20,"paused_at":"2026-05-04T12:00:00Z","show":{"title":"No IDs","ids":{}},"episode":{"season":1,"number":2}}]`,
+	}}
+	server, _ := newTestServer(t, fake)
+
+	watched := listAll(t, server, kindWatched, "", 100)
+	want := []string{warnWatchedEpisodeNoID, warnWatchedMovieNoID + " (2 items)"}
+	if !reflect.DeepEqual(watched.warnings, want) || len(watched.items) != 1 {
+		t.Fatalf("warnings = %q items = %d, want %q and one row", watched.warnings, len(watched.items), want)
+	}
+	progress := listAll(t, server, kindProgress, "", 100)
+	want = []string{warnPlaybackEpisodeNoID, warnPlaybackMovieNoID}
+	if !reflect.DeepEqual(progress.warnings, want) || len(progress.items) != 0 {
+		t.Fatalf("warnings = %q items = %d, want %q and no rows", progress.warnings, len(progress.items), want)
+	}
+}
+
 func TestListWatchedDatesCompletedShowsByTheShowWhenEpisodesHaveNoTime(t *testing.T) {
 	show := func(status string) string {
 		return `{"status":"` + status + `","last_watched_at":"2026-01-02T03:04:05Z","show":{"title":"S","year":2001,"ids":{"tvdb":"1"}},"seasons":[{"number":1,"episodes":[{"number":1}]}]}`

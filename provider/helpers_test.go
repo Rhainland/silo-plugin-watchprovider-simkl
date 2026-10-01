@@ -75,6 +75,7 @@ type traversal struct {
 	cursor   string
 	complete bool
 	pages    int
+	warnings []string
 }
 
 func listAll(t *testing.T, server *Server, kind pluginv1.WatchSyncRemoteStateKind, cursor string, pageSize int32) traversal {
@@ -114,6 +115,10 @@ func listAllWithFault(t *testing.T, server *Server, kind pluginv1.WatchSyncRemot
 			t.Fatalf("page %d has %d items, more than page size %d", page+1, len(response.GetItems()), pageSize)
 		}
 		result.items = append(result.items, response.GetItems()...)
+		for _, warning := range response.GetWarnings() {
+			assertSafe(t, &pluginv1.WatchSyncFault{SafeMessage: warning})
+		}
+		result.warnings = append(result.warnings, response.GetWarnings()...)
 		next := response.GetNextPageToken()
 		if next == "" {
 			result.cursor = response.GetNextCursor()

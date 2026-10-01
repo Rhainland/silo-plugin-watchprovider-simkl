@@ -163,6 +163,10 @@ func (s *Server) applyGroup(ctx context.Context, acct account, group operationGr
 		return s.setRatings(ctx, acct, group.events, results)
 	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_REMOVE_RATING:
 		return s.removeRatings(ctx, acct, group.events, results)
+	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_MARK_DROPPED:
+		return s.changeDropped(ctx, acct, group.events, true, results)
+	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_UNMARK_DROPPED:
+		return s.changeDropped(ctx, acct, group.events, false, results)
 	case pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_SCROBBLE_START,
 		pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_SCROBBLE_PAUSE,
 		pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_SCROBBLE_STOP:
