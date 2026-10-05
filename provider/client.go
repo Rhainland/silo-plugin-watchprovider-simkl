@@ -197,6 +197,43 @@ func (c *simklClient) doOnce(ctx context.Context, acct account, method, path str
 	return resp.StatusCode, 0, false, faultForStatus(resp.StatusCode, code)
 }
 
+// postOAuth2 sends one form-encoded request to an AUTH V2 /oauth2 endpoint,
+// which takes the client ID in the body rather than the simkl-api-key header.
+// A 400 or 401 is returned with its RFC 6749 error code and no fault, because
+// the device flow answers a pending sign-in with 400 and the caller knows what
+// each code means. Every other failure is a fault.
+func (c *simklClient) postOAuth2(ctx context.Context, path string, form url.Values, out any) (status int, code string, fault *pluginv1.WatchSyncFault) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return 0, "", permanentFault("Simkl request could not be created")
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			return 0, "", interruptedFault()
+		}
+		return 0, "", temporaryFault("Simkl is temporarily unreachable")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch {
+	case resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices:
+		if err := json.NewDecoder(io.LimitReader(resp.Body, c.maxResponse)).Decode(out); err != nil {
+			return resp.StatusCode, "", temporaryFault("Simkl returned an unreadable sign-in response")
+		}
+		return resp.StatusCode, "", nil
+	case resp.StatusCode == http.StatusBadRequest, resp.StatusCode == http.StatusUnauthorized:
+		return resp.StatusCode, errorCode(resp.Body), nil
+	case resp.StatusCode == http.StatusTooManyRequests:
+		wait, _ := rateLimitWait(resp, errorCode(resp.Body))
+		return resp.StatusCode, "", rateLimitedFault(wait)
+	case resp.StatusCode >= http.StatusInternalServerError:
+		return resp.StatusCode, "", temporaryFault(fmt.Sprintf("Simkl is temporarily unavailable (HTTP %d)", resp.StatusCode))
+	default:
+		return resp.StatusCode, "", permanentFault(fmt.Sprintf("Simkl sign-in request failed (HTTP %d)", resp.StatusCode))
+	}
+}
+
 // rateLimitWait classifies Simkl's throttling responses, which share status
 // codes with unrelated errors and are told apart by the body's error field.
 func rateLimitWait(resp *http.Response, code string) (time.Duration, bool) {
@@ -226,7 +263,7 @@ func faultForStatus(status int, code string) *pluginv1.WatchSyncFault {
 			SafeMessage: "Simkl rejected the access token; reconnect Simkl",
 		}
 	case status == http.StatusBadRequest && code == "unauthorized_client":
-		return permissionDeniedFault("Simkl rejected the client ID: it belongs to a Simkl AUTH V2 app, and this plugin signs in with AUTH V1 PIN codes")
+		return permissionDeniedFault("Simkl rejected the client ID: it belongs to a Simkl AUTH V2 app, which cannot use AUTH V1 sign-in")
 	case status == http.StatusPreconditionFailed:
 		return permissionDeniedFault("Simkl rejected the client ID; check the Simkl client ID in the plugin settings, or wait if Simkl blocked it for sending too many writes")
 	case status == http.StatusForbidden:

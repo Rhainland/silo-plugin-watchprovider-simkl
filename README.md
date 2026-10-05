@@ -2,7 +2,7 @@
 
 Connects Silo profiles to [Simkl](https://simkl.com) through Silo's `watch_sync_provider.v1` plugin contract. It replaces the Simkl provider that earlier Silo releases built in, and keeps that provider's behavior so existing connections carry over.
 
-Version 0.2.0 needs a Silo server that supports plugin SDK v0.21, which adds dropped shows, the movie rating hold, and sync warnings to the plugin contract.
+Version 0.3.0 needs a Silo server that supports plugin SDK v0.21, which adds dropped shows, the movie rating hold, and sync warnings to the plugin contract.
 
 ## Capabilities
 
@@ -43,15 +43,27 @@ The plugin reads Simkl's dropped shows and dropped anime in full whenever either
 
 ## Setup
 
-1. Create an app in your Simkl account's [developer settings](https://simkl.com/settings/developer/).
-2. Install the plugin. In its settings, enter the app's client ID. The plugin does not use the client secret.
+1. Create an app in your Simkl account's [developer settings](https://simkl.com/settings/developer/). Choose the **TV, devices & command line** type. The plugin does not use a client secret, and Simkl requires one from **Server apps & services** apps.
+2. Install the plugin. In its settings, enter the app's client ID.
 3. Connect each Silo profile from its watch-provider settings. Silo shows a code to enter at simkl.com/pin.
 
-The plugin signs in with Simkl's PIN codes, part of what Simkl calls AUTH V1. Simkl plans to retire AUTH V1 around April 2027, and its PIN codes do not work with the client ID of an AUTH V2 app. If Simkl rejects the client ID for that reason, the plugin says so when a profile connects.
+## Simkl AUTH V1 and AUTH V2
+
+Simkl has two sign-in systems. Apps created in Simkl's developer settings now use AUTH V2. Older apps use AUTH V1, which Simkl plans to retire around April 2027. An app cannot move from one to the other: AUTH V2 needs a new app with its own client ID, and every profile signs in to it once.
+
+The plugin works out which kind of app the client ID belongs to when a profile connects. An AUTH V2 app connects with Simkl's device codes and asks for read and write access. Its access tokens last seven days. Silo renews an expiring token the next time it syncs, so a connection keeps working as long as Silo uses it at least once every 180 days. An AUTH V1 app connects with PIN codes, and its tokens do not expire.
+
+Simkl only accepts a token together with the client ID of the app that issued it. Each AUTH V2 connection records the app it signed in through and keeps using it. AUTH V1 connections use the **Client ID** setting. To move an install whose profiles connected through an AUTH V1 app:
+
+1. Create an AUTH V2 app as described in [Setup](#setup).
+2. Leave the AUTH V1 app's client ID in the **Client ID** setting, and enter the new app's client ID as the **AUTH V2 client ID**.
+3. New connections sign in through the AUTH V2 app. Existing connections keep using the AUTH V1 app until the profile disconnects Simkl and connects it again.
+
+Do not replace the AUTH V1 client ID with the AUTH V2 one while profiles are connected through the AUTH V1 app. The plugin would then send their tokens with a client ID that did not issue them.
 
 ## Upgrading from the built-in Simkl provider
 
-Existing Simkl connections carry over once a Silo server release that maps this plugin to the built-in `simkl` provider is installed. The plugin reuses the stored Simkl tokens, which do not expire, and produces the same item keys, so profiles do not reconnect and Silo keeps its record of what was synced. If that server release does not copy the client ID from the old Simkl server setting, enter it in the plugin's settings.
+Existing Simkl connections carry over once a Silo server release that maps this plugin to the built-in `simkl` provider is installed. The plugin reuses the stored Simkl tokens, which are AUTH V1 tokens that do not expire, and produces the same item keys, so profiles do not reconnect and Silo keeps its record of what was synced. If that server release does not copy the client ID from the old Simkl server setting, enter it in the plugin's settings.
 
 The first sync after the upgrade reads the whole Simkl library once, because the plugin tracks its read position separately from the built-in provider. Plays, progress, ratings, and dropped shows Silo already has are not imported twice. For the same reason, that sync warns that titles were removed from a Simkl list if the account ever removed one.
 
@@ -60,7 +72,7 @@ Playback events for different titles are no longer sent strictly one after anoth
 ## Not yet supported
 
 - Importing series rating removals while the account has anime ratings without a movie or TV type. The built-in provider still imported them. The plugin contract marks a ratings read complete for movies and series together, so the plugin imports removals of neither kind until a newer contract can tell them apart.
-- Signing in through Simkl AUTH V2.
+- Revoking an AUTH V2 sign-in on Simkl when a profile disconnects. The plugin contract has no disconnect call, so the connection stays listed in the account's [Connected Apps](https://simkl.com/settings/connected-apps/) until its owner removes it there.
 
 ## Development
 

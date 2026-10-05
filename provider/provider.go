@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	capabilityID   = "simkl"
-	configClientID = "app.client_id"
+	capabilityID     = "simkl"
+	configClientID   = "app.client_id"
+	configV2ClientID = "app.v2_client_id"
 
 	// The host cancels every RPC after two minutes. Upstream work stops this
 	// long before that, so the plugin can still answer with a fault the host
@@ -24,7 +25,7 @@ const (
 )
 
 // Server serves the WatchSyncProvider service. Register DeviceAuthorization
-// alongside it: Simkl connects through PIN codes.
+// alongside it: Simkl connects through device codes.
 type Server struct {
 	pluginv1.UnimplementedWatchSyncProviderServer
 	simkl *simklClient
@@ -49,15 +50,24 @@ func (s *Server) DeviceAuthorization() pluginv1.WatchSyncDeviceAuthorizationServ
 	return &deviceAuthServer{server: s}
 }
 
-// RefreshCredentials returns the stored credentials unchanged. Simkl PIN
-// tokens do not expire and have no refresh grant.
-func (s *Server) RefreshCredentials(_ context.Context, req *pluginv1.WatchSyncRefreshCredentialsRequest) (*pluginv1.WatchSyncCredentialResponse, error) {
-	if _, fault := s.authenticate(req.GetContext()); fault != nil {
+// RefreshCredentials renews an AUTH V2 connection's access token, which lasts
+// seven days. An AUTH V1 token does not expire and has no refresh token, so
+// its credentials are returned unchanged.
+func (s *Server) RefreshCredentials(ctx context.Context, req *pluginv1.WatchSyncRefreshCredentialsRequest) (*pluginv1.WatchSyncCredentialResponse, error) {
+	acct, fault := s.authenticate(req.GetContext())
+	if fault != nil {
 		return &pluginv1.WatchSyncCredentialResponse{Fault: fault}, nil
 	}
-	return &pluginv1.WatchSyncCredentialResponse{
-		Credentials: cloneCredentials(req.GetContext().GetCredentials()),
-	}, nil
+	refreshToken := strings.TrimSpace(req.GetContext().GetCredentials().GetRefreshToken())
+	if refreshToken == "" {
+		return &pluginv1.WatchSyncCredentialResponse{
+			Credentials: cloneCredentials(req.GetContext().GetCredentials()),
+		}, nil
+	}
+	ctx, cancel := withRPCDeadline(ctx)
+	defer cancel()
+	credentials, fault := s.refreshV2(ctx, acct.clientID, refreshToken)
+	return &pluginv1.WatchSyncCredentialResponse{Credentials: credentials, Fault: fault}, nil
 }
 
 func (s *Server) GetAccount(ctx context.Context, req *pluginv1.WatchSyncGetAccountRequest) (*pluginv1.WatchSyncGetAccountResponse, error) {
@@ -186,10 +196,10 @@ func (s *Server) applyGroup(ctx context.Context, acct account, group operationGr
 	}
 }
 
-// authenticate checks the capability, the install-wide client ID, and the
-// profile's access token.
+// authenticate checks the capability, the admin's Simkl apps, and the
+// profile's access token, and pairs the token with the app that issued it.
 func (s *Server) authenticate(auth *pluginv1.WatchSyncAuthenticatedContext) (account, *pluginv1.WatchSyncFault) {
-	clientID, fault := configuredClientID(auth.GetCapabilityId(), auth.GetProviderConfig())
+	apps, fault := configuredApps(auth.GetCapabilityId(), auth.GetProviderConfig())
 	if fault != nil {
 		return account{}, fault
 	}
@@ -200,24 +210,62 @@ func (s *Server) authenticate(auth *pluginv1.WatchSyncAuthenticatedContext) (acc
 			SafeMessage: "Simkl access token is missing; reconnect Simkl",
 		}
 	}
-	return account{clientID: clientID, token: token}, nil
+	return account{clientID: apps.clientIDFor(auth.GetCredentials()), token: token}, nil
 }
 
-// configuredClientID returns the client ID of the admin's Simkl API app.
-// Simkl's PIN flow and API calls send only the client ID; the app's client
-// secret is never used, so the plugin does not ask for it.
-func configuredClientID(capability string, config *pluginv1.WatchSyncProviderConfig) (string, *pluginv1.WatchSyncFault) {
+// simklApps holds the client IDs of the admin's Simkl API apps. Simkl ties a
+// token to the app that issued it, and an AUTH V1 app and an AUTH V2 app are
+// separate registrations, so an install that connected profiles through an
+// AUTH V1 app keeps that app as clientID and adds its AUTH V2 app as
+// v2ClientID. Requests use the app recorded with the connection; see
+// clientIDFor. Neither flow sends the app's client secret, so the plugin does
+// not ask for it.
+type simklApps struct {
+	// clientID is app.client_id, an AUTH V1 or AUTH V2 app.
+	clientID string
+	// v2ClientID is app.v2_client_id, an optional AUTH V2 app that new
+	// connections use instead of clientID.
+	v2ClientID string
+}
+
+// signInClientID is the app new connections sign in through, and whether it
+// is known to be an AUTH V2 app.
+func (a simklApps) signInClientID() (string, bool) {
+	if a.v2ClientID != "" {
+		return a.v2ClientID, true
+	}
+	return a.clientID, false
+}
+
+// clientIDFor returns the app that issued credentials. An AUTH V2 connection
+// records its app when it signs in. Credentials without that record come from
+// the PIN flow, which only clientID can run.
+func (a simklApps) clientIDFor(credentials *pluginv1.WatchSyncCredentials) string {
+	if issuer := strings.TrimSpace(credentials.GetSecretAttributes()[clientIDAttribute]); issuer != "" {
+		return issuer
+	}
+	return a.clientID
+}
+
+func configuredApps(capability string, config *pluginv1.WatchSyncProviderConfig) (simklApps, *pluginv1.WatchSyncFault) {
 	if capability != capabilityID {
-		return "", invalidRequestFault("Unknown Simkl capability")
+		return simklApps{}, invalidRequestFault("Unknown Simkl capability")
 	}
-	clientID := strings.TrimSpace(config.GetValues()[configClientID])
-	if clientID == "" {
-		clientID = strings.TrimSpace(config.GetSecretValues()[configClientID])
+	apps := simklApps{
+		clientID:   configValue(config, configClientID),
+		v2ClientID: configValue(config, configV2ClientID),
 	}
-	if clientID == "" {
-		return "", permissionDeniedFault("Simkl is not set up: an administrator must enter the client ID of a Simkl API app in the plugin settings")
+	if apps.clientID == "" {
+		return simklApps{}, permissionDeniedFault("Simkl is not set up: an administrator must enter the client ID of a Simkl API app in the plugin settings")
 	}
-	return clientID, nil
+	return apps, nil
+}
+
+func configValue(config *pluginv1.WatchSyncProviderConfig, key string) string {
+	if value := strings.TrimSpace(config.GetValues()[key]); value != "" {
+		return value
+	}
+	return strings.TrimSpace(config.GetSecretValues()[key])
 }
 
 func requestedStateKind(kinds []pluginv1.WatchSyncRemoteStateKind) (pluginv1.WatchSyncRemoteStateKind, *pluginv1.WatchSyncFault) {

@@ -10,9 +10,12 @@ import (
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 )
 
-func TestStartDeviceAuthSendsSimklHeadersAndDecodesResponse(t *testing.T) {
+func TestStartDeviceAuthFallsBackToPinCodesForAnAuthV1App(t *testing.T) {
 	var gotPath, gotAPIKey, gotAuthorization string
 	server, _ := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerV1AppProbe(t, w, r) {
+			return
+		}
 		gotPath = r.URL.RequestURI()
 		gotAPIKey = r.Header.Get("simkl-api-key")
 		gotAuthorization = r.Header.Get("Authorization")
@@ -57,7 +60,10 @@ func TestStartDeviceAuthSendsSimklHeadersAndDecodesResponse(t *testing.T) {
 }
 
 func TestStartDeviceAuthRejectsIncompleteResponse(t *testing.T) {
-	server, _ := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server, _ := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerV1AppProbe(t, w, r) {
+			return
+		}
 		writeJSON(t, w, `{"result":"OK","user_code":"ABCDE","verification_url":"https://simkl.com/pin/","expires_in":0,"interval":5}`)
 	}))
 	response, _ := server.DeviceAuthorization().Start(context.Background(), &pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest{
@@ -69,20 +75,17 @@ func TestStartDeviceAuthRejectsIncompleteResponse(t *testing.T) {
 	}
 }
 
-func TestStartDeviceAuthExplainsAuthV2ClientID(t *testing.T) {
-	server, _ := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(t, w, `{"error":"unauthorized_client","code":400,"message":"client `+testClientID+` is a V2 client"}`)
-	}))
-	response, _ := server.DeviceAuthorization().Start(context.Background(), &pluginv1.WatchSyncDeviceAuthorizationServiceStartRequest{
-		CapabilityId:   capabilityID,
-		ProviderConfig: providerConfig(testClientID),
-	})
-	fault := response.GetFault()
-	if fault.GetCode() != pluginv1.WatchSyncFaultCode_WATCH_SYNC_FAULT_CODE_PERMISSION_DENIED {
-		t.Fatalf("fault = %v, want permission denied", fault)
+// answerV1AppProbe answers the AUTH V2 device request as Simkl answers it for
+// an AUTH V1 app, and reports whether r was that request.
+func answerV1AppProbe(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
+	t.Helper()
+	if r.URL.Path != oauth2DevicePath {
+		return false
 	}
-	assertSafe(t, fault)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	writeJSON(t, w, `{"error":"invalid_client","error_description":"This client_id is not enabled for OAuth 2.0"}`)
+	return true
 }
 
 func startedPinState(t *testing.T, server *Server) []byte {
@@ -100,6 +103,9 @@ func startedPinState(t *testing.T, server *Server) []byte {
 func pinServer(t *testing.T, poll func(w http.ResponseWriter, r *http.Request)) *Server {
 	t.Helper()
 	server, _ := newTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answerV1AppProbe(t, w, r) {
+			return
+		}
 		if r.URL.Path == "/oauth/pin" {
 			writeJSON(t, w, `{"result":"OK","device_code":"DEVICE","user_code":"ABCDE","verification_url":"https://simkl.com/pin","expires_in":900,"interval":5}`)
 			return
