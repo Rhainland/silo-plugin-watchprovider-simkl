@@ -23,6 +23,26 @@ type pinStatusResponse struct {
 	AccessToken string `json:"access_token"`
 }
 
+// oauth2DeviceResponse answers POST /oauth2/device (RFC 8628 section 3.2).
+type oauth2DeviceResponse struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete"`
+	ExpiresIn               int    `json:"expires_in"`
+	Interval                int    `json:"interval"`
+}
+
+// oauth2TokenResponse answers POST /oauth2/token for the device and refresh
+// grants alike.
+type oauth2TokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
+	RefreshToken string `json:"refresh_token"`
+	Scope        string `json:"scope"`
+}
+
 type userSettingsResponse struct {
 	User struct {
 		Name string `json:"name"`

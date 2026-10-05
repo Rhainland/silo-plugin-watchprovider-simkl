@@ -13,7 +13,7 @@ func TestManifestDeclaresTheSimklProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
-	if parsed.GetPluginId() != "silo.watchprovider.simkl" || parsed.GetVersion() != "0.2.0" {
+	if parsed.GetPluginId() != "silo.watchprovider.simkl" || parsed.GetVersion() != "0.3.0" {
 		t.Fatalf("plugin = %q %q", parsed.GetPluginId(), parsed.GetVersion())
 	}
 	capabilities := parsed.GetCapabilities()
@@ -67,7 +67,7 @@ func TestManifestAdvertisesTheBuiltInCapabilities(t *testing.T) {
 	}
 }
 
-func TestManifestAsksForThePublicClientIDOnly(t *testing.T) {
+func TestManifestAsksForPublicClientIDsOnly(t *testing.T) {
 	t.Parallel()
 	parsed, err := manifest.Load(manifestJSON)
 	if err != nil {
@@ -77,8 +77,11 @@ func TestManifestAsksForThePublicClientIDOnly(t *testing.T) {
 	if len(schemas) != 1 || schemas[0].GetKey() != "app" || !schemas[0].GetRequired() {
 		t.Fatalf("global config = %v", schemas)
 	}
+	// Simkl client IDs are public; neither sign-in flow sends a client secret.
 	fields := schemas[0].GetAdminForm().GetFields()
-	if len(fields) != 1 || fields[0].GetKey() != "client_id" || fields[0].GetSecret() || !fields[0].GetRequired() {
-		t.Fatalf("fields = %v, want one public client_id field", fields)
+	if len(fields) != 2 ||
+		fields[0].GetKey() != "client_id" || fields[0].GetSecret() || !fields[0].GetRequired() ||
+		fields[1].GetKey() != "v2_client_id" || fields[1].GetSecret() || fields[1].GetRequired() {
+		t.Fatalf("fields = %v, want a required client_id and an optional v2_client_id, both public", fields)
 	}
 }
