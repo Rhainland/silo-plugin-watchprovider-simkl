@@ -210,14 +210,15 @@ func (s *Server) authenticate(auth *pluginv1.WatchSyncAuthenticatedContext) (acc
 			SafeMessage: "Simkl access token is missing; reconnect Simkl",
 		}
 	}
-	return account{clientID: apps.clientIDFor(token), token: token}, nil
+	return account{clientID: apps.clientIDFor(auth.GetCredentials()), token: token}, nil
 }
 
 // simklApps holds the client IDs of the admin's Simkl API apps. Simkl ties a
 // token to the app that issued it, and an AUTH V1 app and an AUTH V2 app are
 // separate registrations, so an install that connected profiles through an
 // AUTH V1 app keeps that app as clientID and adds its AUTH V2 app as
-// v2ClientID. Neither flow sends the app's client secret, so the plugin does
+// v2ClientID. Requests use the app recorded with the connection; see
+// clientIDFor. Neither flow sends the app's client secret, so the plugin does
 // not ask for it.
 type simklApps struct {
 	// clientID is app.client_id, an AUTH V1 or AUTH V2 app.
@@ -236,17 +237,14 @@ func (a simklApps) signInClientID() (string, bool) {
 	return a.clientID, false
 }
 
-// clientIDFor returns the app that issued token. Only AUTH V2 issues tokens
-// with the simkl_at_ prefix, so the format alone tells the two apart.
-func (a simklApps) clientIDFor(token string) string {
-	if isV2Token(token) && a.v2ClientID != "" {
-		return a.v2ClientID
+// clientIDFor returns the app that issued credentials. An AUTH V2 connection
+// records its app when it signs in. Credentials without that record come from
+// the PIN flow, which only clientID can run.
+func (a simklApps) clientIDFor(credentials *pluginv1.WatchSyncCredentials) string {
+	if issuer := strings.TrimSpace(credentials.GetSecretAttributes()[clientIDAttribute]); issuer != "" {
+		return issuer
 	}
 	return a.clientID
-}
-
-func isV2Token(token string) bool {
-	return strings.HasPrefix(token, v2AccessTokenPrefix)
 }
 
 func configuredApps(capability string, config *pluginv1.WatchSyncProviderConfig) (simklApps, *pluginv1.WatchSyncFault) {

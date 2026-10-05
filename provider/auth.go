@@ -26,7 +26,9 @@ const (
 	v2Scope      = "media:read media:write"
 	v2WriteScope = "media:write"
 
-	v2AccessTokenPrefix = "simkl_at_"
+	// clientIDAttribute is the credential secret attribute that records which
+	// app issued an AUTH V2 connection's tokens.
+	clientIDAttribute = "client_id"
 
 	// slowDownStep is how much a slow_down answer lengthens the polling
 	// interval, as RFC 8628 prescribes.
@@ -180,7 +182,7 @@ func (d *deviceAuthServer) pollV2(ctx context.Context, clientID string, state si
 	}, &token)
 	switch {
 	case status == http.StatusTooManyRequests:
-		return slowDown(state)
+		return slowDown(state, fault.GetRetryAfter().AsDuration())
 	case fault != nil:
 		return &pluginv1.WatchSyncDeviceAuthorizationServicePollResponse{Fault: fault}
 	case status == http.StatusOK:
@@ -194,7 +196,7 @@ func (d *deviceAuthServer) pollV2(ctx context.Context, clientID string, state si
 				Fault: permissionDeniedFault("Simkl granted read-only access, and Silo needs to write watch history; connect Simkl again"),
 			}
 		}
-		credentials := d.server.v2Credentials(token, "")
+		credentials := d.server.v2Credentials(token, clientID, "")
 		if credentials == nil {
 			return &pluginv1.WatchSyncDeviceAuthorizationServicePollResponse{Fault: temporaryFault("Simkl returned no access token")}
 		}
@@ -205,7 +207,7 @@ func (d *deviceAuthServer) pollV2(ctx context.Context, clientID string, state si
 	case code == "authorization_pending":
 		return pollStatus(pluginv1.WatchSyncDeviceAuthorizationStatus_WATCH_SYNC_DEVICE_AUTHORIZATION_STATUS_PENDING)
 	case code == "slow_down":
-		return slowDown(state)
+		return slowDown(state, 0)
 	case code == "expired_token", code == "invalid_grant":
 		// invalid_grant covers a code issued to another client or already
 		// used; it cannot complete either, so the user starts over.
@@ -221,12 +223,14 @@ func (d *deviceAuthServer) pollV2(ctx context.Context, clientID string, state si
 	}
 }
 
-// slowDown keeps the flow pending with an interval five seconds longer. The
+// slowDown keeps the flow pending with an interval five seconds longer, or
+// minimum when that is longer, such as a rate limit's Retry-After. The
 // interval is stored in the flow state so the next slow_down lengthens it
 // again.
-func slowDown(state signInState) *pluginv1.WatchSyncDeviceAuthorizationServicePollResponse {
-	interval := time.Duration(max(state.IntervalSeconds, 1))*time.Second + slowDownStep
-	state.IntervalSeconds = int(interval / time.Second)
+func slowDown(state signInState, minimum time.Duration) *pluginv1.WatchSyncDeviceAuthorizationServicePollResponse {
+	interval := max(time.Duration(max(state.IntervalSeconds, 1))*time.Second+slowDownStep, minimum)
+	state.IntervalSeconds = int((interval + time.Second - 1) / time.Second)
+	interval = time.Duration(state.IntervalSeconds) * time.Second
 	encoded, err := json.Marshal(state)
 	if err != nil {
 		return pollStatus(pluginv1.WatchSyncDeviceAuthorizationStatus_WATCH_SYNC_DEVICE_AUTHORIZATION_STATUS_PENDING)
@@ -279,7 +283,7 @@ func (s *Server) refreshV2(ctx context.Context, clientID, refreshToken string) (
 	case fault != nil:
 		return nil, fault
 	case status == http.StatusOK:
-		credentials := s.v2Credentials(token, refreshToken)
+		credentials := s.v2Credentials(token, clientID, refreshToken)
 		if credentials == nil {
 			return nil, temporaryFault("Simkl returned no access token")
 		}
@@ -298,19 +302,21 @@ func (s *Server) refreshV2(ctx context.Context, clientID, refreshToken string) (
 	}
 }
 
-// v2Credentials converts an AUTH V2 token response, or returns nil when it
-// holds no access token. A response without a refresh token keeps the
-// previous one.
-func (s *Server) v2Credentials(token oauth2TokenResponse, previousRefresh string) *pluginv1.WatchSyncCredentials {
+// v2Credentials converts an AUTH V2 token response from clientID's app, or
+// returns nil when it holds no access token. A response without a refresh
+// token keeps the previous one. The credentials record clientID, because the
+// tokens only work with the app that issued them.
+func (s *Server) v2Credentials(token oauth2TokenResponse, clientID, previousRefresh string) *pluginv1.WatchSyncCredentials {
 	accessToken := strings.TrimSpace(token.AccessToken)
 	if accessToken == "" {
 		return nil
 	}
 	credentials := &pluginv1.WatchSyncCredentials{
-		AccessToken:  accessToken,
-		RefreshToken: strings.TrimSpace(token.RefreshToken),
-		TokenType:    token.TokenType,
-		Scopes:       strings.Fields(token.Scope),
+		AccessToken:      accessToken,
+		RefreshToken:     strings.TrimSpace(token.RefreshToken),
+		TokenType:        token.TokenType,
+		Scopes:           strings.Fields(token.Scope),
+		SecretAttributes: map[string]string{clientIDAttribute: clientID},
 	}
 	if credentials.RefreshToken == "" {
 		credentials.RefreshToken = previousRefresh

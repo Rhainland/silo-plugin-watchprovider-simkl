@@ -189,7 +189,8 @@ func TestPollDeviceAuthReturnsAuthV2Credentials(t *testing.T) {
 	credentials := response.GetCredentials()
 	if credentials.GetAccessToken() != testV2Token || credentials.GetRefreshToken() != testV2RefreshToken ||
 		credentials.GetTokenType() != "Bearer" || len(credentials.GetScopes()) != 2 ||
-		!credentials.GetExpiresAt().AsTime().Equal(now.Add(7*24*time.Hour)) {
+		!credentials.GetExpiresAt().AsTime().Equal(now.Add(7*24*time.Hour)) ||
+		credentials.GetSecretAttributes()[clientIDAttribute] != testV2ClientID {
 		t.Fatalf("credentials = %v", credentials)
 	}
 }
@@ -296,15 +297,20 @@ func TestPollDeviceAuthFinishesAPinSignInStartedBeforeTheUpgrade(t *testing.T) {
 }
 
 func TestEachTokenIsSentWithTheAppThatIssuedIt(t *testing.T) {
+	issuedBy := func(clientID string) map[string]string { return map[string]string{clientIDAttribute: clientID} }
 	for _, tc := range []struct {
-		name   string
-		config *pluginv1.WatchSyncProviderConfig
-		token  string
-		want   string
+		name       string
+		config     *pluginv1.WatchSyncProviderConfig
+		token      string
+		attributes map[string]string
+		want       string
 	}{
 		{name: "AUTH V1 token beside an AUTH V2 app", config: v2ProviderConfig(testClientID, testV2ClientID), token: testToken, want: testClientID},
-		{name: "AUTH V2 token beside an AUTH V1 app", config: v2ProviderConfig(testClientID, testV2ClientID), token: testV2Token, want: testV2ClientID},
-		{name: "AUTH V2 token from the only app", config: providerConfig(testV2ClientID), token: testV2Token, want: testV2ClientID},
+		{name: "AUTH V2 token from the separate AUTH V2 app", config: v2ProviderConfig(testClientID, testV2ClientID), token: testV2Token, attributes: issuedBy(testV2ClientID), want: testV2ClientID},
+		// An install that signed profiles in through an AUTH V2 app in the
+		// Client ID setting, then entered a different AUTH V2 app.
+		{name: "AUTH V2 token from the Client ID app after another AUTH V2 app was added", config: v2ProviderConfig(testClientID, testV2ClientID), token: testV2Token, attributes: issuedBy(testClientID), want: testClientID},
+		{name: "AUTH V2 token from the only app", config: providerConfig(testV2ClientID), token: testV2Token, attributes: issuedBy(testV2ClientID), want: testV2ClientID},
 		{name: "AUTH V1 token from the only app", config: providerConfig(testClientID), token: testToken, want: testClientID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -316,7 +322,7 @@ func TestEachTokenIsSentWithTheAppThatIssuedIt(t *testing.T) {
 			response, _ := server.GetAccount(context.Background(), &pluginv1.WatchSyncGetAccountRequest{Context: &pluginv1.WatchSyncAuthenticatedContext{
 				CapabilityId:   capabilityID,
 				ProviderConfig: tc.config,
-				Credentials:    &pluginv1.WatchSyncCredentials{AccessToken: tc.token},
+				Credentials:    &pluginv1.WatchSyncCredentials{AccessToken: tc.token, SecretAttributes: tc.attributes},
 			}})
 			if response.GetFault() != nil || gotAPIKey != tc.want || gotAuthorization != "Bearer "+tc.token {
 				t.Fatalf("fault = %v simkl-api-key = %q Authorization = %q, want %q", response.GetFault(), gotAPIKey, gotAuthorization, tc.want)
@@ -330,9 +336,10 @@ func v2AuthContext(config *pluginv1.WatchSyncProviderConfig) *pluginv1.WatchSync
 		CapabilityId:   capabilityID,
 		ProviderConfig: config,
 		Credentials: &pluginv1.WatchSyncCredentials{
-			AccessToken:  testV2Token,
-			RefreshToken: testV2RefreshToken,
-			TokenType:    "Bearer",
+			AccessToken:      testV2Token,
+			RefreshToken:     testV2RefreshToken,
+			TokenType:        "Bearer",
+			SecretAttributes: map[string]string{clientIDAttribute: testV2ClientID},
 		},
 	}
 }
@@ -367,7 +374,8 @@ func TestRefreshCredentialsRenewsAnAuthV2Token(t *testing.T) {
 			}
 			credentials := response.GetCredentials()
 			if credentials.GetAccessToken() != renewed || credentials.GetRefreshToken() != tc.wantRefreshed ||
-				!credentials.GetExpiresAt().AsTime().Equal(now.Add(7*24*time.Hour)) {
+				!credentials.GetExpiresAt().AsTime().Equal(now.Add(7*24*time.Hour)) ||
+				credentials.GetSecretAttributes()[clientIDAttribute] != testV2ClientID {
 				t.Fatalf("credentials = %v", credentials)
 			}
 		})
@@ -430,5 +438,18 @@ func TestPollDeviceAuthAcceptsATokenResponseWithoutScope(t *testing.T) {
 	if response.GetStatus() != pluginv1.WatchSyncDeviceAuthorizationStatus_WATCH_SYNC_DEVICE_AUTHORIZATION_STATUS_AUTHORIZED ||
 		len(response.GetCredentials().GetScopes()) != 2 {
 		t.Fatalf("response = %v, want authorized with the requested scopes", response)
+	}
+}
+
+func TestPollDeviceAuthWaitsOutSimklsRetryAfter(t *testing.T) {
+	server, _ := v2Simkl(t, func(w http.ResponseWriter, _ url.Values) {
+		w.Header().Set("Retry-After", "30")
+		oauth2Error(t, w, http.StatusTooManyRequests, "too_many_requests")
+	})
+	config := providerConfig(testV2ClientID)
+	response := pollV2(t, server, config, startV2(t, server, config).GetProviderState())
+	if response.GetStatus() != pluginv1.WatchSyncDeviceAuthorizationStatus_WATCH_SYNC_DEVICE_AUTHORIZATION_STATUS_PENDING ||
+		response.GetPollingInterval().AsDuration() != 30*time.Second {
+		t.Fatalf("response = %v, want pending with a 30s interval", response)
 	}
 }

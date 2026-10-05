@@ -53,7 +53,7 @@ Simkl has two sign-in systems. Apps created in Simkl's developer settings now us
 
 The plugin works out which kind of app the client ID belongs to when a profile connects. An AUTH V2 app connects with Simkl's device codes and asks for read and write access. Its access tokens last seven days. Silo renews an expiring token the next time it syncs, so a connection keeps working as long as Silo uses it at least once every 180 days. An AUTH V1 app connects with PIN codes, and its tokens do not expire.
 
-Simkl only accepts a token together with the client ID of the app that issued it. To move an install whose profiles connected through an AUTH V1 app:
+Simkl only accepts a token together with the client ID of the app that issued it. Each AUTH V2 connection records the app it signed in through and keeps using it. AUTH V1 connections use the **Client ID** setting. To move an install whose profiles connected through an AUTH V1 app:
 
 1. Create an AUTH V2 app as described in [Setup](#setup).
 2. Leave the AUTH V1 app's client ID in the **Client ID** setting, and enter the new app's client ID as the **AUTH V2 client ID**.
