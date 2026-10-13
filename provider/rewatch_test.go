@@ -111,3 +111,44 @@ func TestMarkWatchedSendsAPlayWithoutAWatchTimeWithoutTheRewatchFlag(t *testing.
 		t.Fatalf("writes by URI = %v", byURI)
 	}
 }
+
+func TestScrobbleStopSendsRewatchesOnlyWhenTheProfileTurnedThemOn(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		settings  map[string]string
+		wantQuery string
+	}{
+		// An older Silo server sends no connection settings.
+		{name: "no settings", settings: nil, wantQuery: ""},
+		{name: "off", settings: map[string]string{settingTrackRewatches: "false"}, wantQuery: ""},
+		{name: "on", settings: map[string]string{settingTrackRewatches: "true"}, wantQuery: "allow_rewatch=yes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, requests := recordingServer(t, http.StatusCreated, `{"action":"scrobble"}`)
+			start := scrobbleStart()
+			pause := scrobbleStart()
+			pause.EventId = "pause"
+			pause.Operation = pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_SCROBBLE_PAUSE
+			stop := scrobbleStart()
+			stop.EventId = "stop"
+			stop.Operation = pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_SCROBBLE_STOP
+			stop.PositionSeconds, stop.DurationSeconds, stop.Completed = 5400, 6000, true
+			response := applyEventsWithSettings(t, server, tc.settings, start, pause, stop)
+			if status := resultsByID(response)["stop"].GetStatus(); status != pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED {
+				t.Fatalf("stop status = %v", status)
+			}
+			if len(*requests) != 3 {
+				t.Fatalf("requests = %+v", *requests)
+			}
+			if got := (*requests)[0]; got.path != "/scrobble/start" || got.query != "" {
+				t.Fatalf("start request = %s?%s, want no rewatch flag", got.path, got.query)
+			}
+			if got := (*requests)[1]; got.path != "/scrobble/pause" || got.query != "" {
+				t.Fatalf("pause request = %s?%s, want no rewatch flag", got.path, got.query)
+			}
+			if got := (*requests)[2]; got.path != "/scrobble/stop" || got.query != tc.wantQuery {
+				t.Fatalf("stop request = %s?%s, want query %q", got.path, got.query, tc.wantQuery)
+			}
+		})
+	}
+}
