@@ -152,3 +152,20 @@ func TestScrobbleStopSendsRewatchesOnlyWhenTheProfileTurnedThemOn(t *testing.T) 
 		})
 	}
 }
+
+func TestScrobbleStopOfUnfinishedPlaybackSendsNoRewatch(t *testing.T) {
+	server, requests := recordingServer(t, http.StatusCreated, `{"action":"scrobble"}`)
+	stop := scrobbleStart()
+	stop.EventId = "stop"
+	stop.Operation = pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_SCROBBLE_STOP
+	// 85% passes Simkl's watched threshold, but Silo has not counted the
+	// playback as finished.
+	stop.PositionSeconds, stop.DurationSeconds, stop.Completed = 5100, 6000, false
+	applyEventsWithSettings(t, server, map[string]string{settingTrackRewatches: "true"}, stop)
+	if len(*requests) != 1 {
+		t.Fatalf("requests = %+v", *requests)
+	}
+	if got := (*requests)[0]; got.path != "/scrobble/stop" || got.query != "" {
+		t.Fatalf("stop request = %s?%s, want no rewatch flag", got.path, got.query)
+	}
+}

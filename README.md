@@ -41,7 +41,7 @@ Rating a movie on Simkl files it as watched. The plugin therefore asks Silo to h
 Simkl ignores a new play of a movie or episode the account already watched, unless the request asks for a rewatch. Each Silo profile chooses with the **Log rewatches** switch on its Simkl connection, which is off by default, as Simkl asks of every app. When it is on, the plugin sends exported plays and playback stops with `allow_rewatch=yes`, and Simkl records a play of a title the account already finished as a rewatch with its own date.
 
 - Rewatches are a Simkl PRO and VIP feature. On a free account Simkl records the first watch of a title as usual and nothing for later plays.
-- Exported plays carry the flag only while **Send watched changes** is on. Of the live playback events, only the stop carries it: Simkl warns that a flag on a playback start can log a rewatch of whatever played before.
+- Exported plays carry the flag only while **Send watched changes** is on. Of the live playback events, only the stop of finished playback carries it: Simkl warns that a flag on a playback start can log a rewatch of whatever played before.
 - Simkl merges two watches of the same movie or episode less than two days apart into one, so a play Silo sends again does not add a second rewatch.
 - A play without a watch time is sent without the flag, because Simkl would date it at the time it arrives.
 - Imports still bring in one play per title. Reading rewatch sessions back from Simkl is not supported yet.
