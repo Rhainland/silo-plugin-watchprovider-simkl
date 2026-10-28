@@ -75,6 +75,7 @@
       }
     }
   ],
+  "metadata": { "configuration_check": true },
   "category": "Watch Providers",
   "presentation": {
     "display_name": "Simkl Watch Provider",

@@ -17,5 +17,6 @@ func main() {
 	server := provider.NewServer(nil)
 	runtime.ServeManifestWithOptions(manifestJSON, version, runtime.CapabilityServers{
 		WatchSyncProvider: server,
-	}, runtime.WithWatchSyncDeviceAuthorization(server.DeviceAuthorization()))
+	}, runtime.WithWatchSyncDeviceAuthorization(server.DeviceAuthorization()),
+		runtime.WithConfigurationChecks(server.ConfigurationChecks()))
 }
