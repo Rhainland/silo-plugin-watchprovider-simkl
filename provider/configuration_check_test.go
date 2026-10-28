@@ -44,6 +44,7 @@ func TestConfigurationCheck(t *testing.T) {
 		{name: "AUTH V2 app", app: map[string]any{"client_id": "v2-app"}, wantOK: true, wantProbes: 1},
 		{name: "AUTH V1 app with AUTH V2 app", app: map[string]any{"client_id": "v1-app", "v2_client_id": "v2-app"}, wantOK: true, wantProbes: 2},
 		{name: "unknown client ID", app: map[string]any{"client_id": "unknown"}, wantMessage: "Simkl does not recognize the client ID", wantProbes: 1},
+		{name: "AUTH V1 app as AUTH V2 client ID", app: map[string]any{"client_id": "v1-app", "v2_client_id": "v1-app"}, wantMessage: "belongs to an AUTH V1 app", wantProbes: 2},
 		{name: "unknown AUTH V2 client ID", app: map[string]any{"client_id": "v1-app", "v2_client_id": "unknown"}, wantMessage: "Simkl does not recognize the AUTH V2 client ID", wantProbes: 2},
 		{name: "Simkl unavailable", app: map[string]any{"client_id": "down"}, wantMessage: "Could not check the client ID with Simkl", wantProbes: 1},
 		{name: "blank client ID", app: map[string]any{"client_id": "  "}, wantMessage: "Enter the client ID"},

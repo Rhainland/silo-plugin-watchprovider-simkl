@@ -10,7 +10,7 @@ import (
 
 // probePath is an anonymous lookup Simkl answers according to the client ID
 // alone: 412 client_id_failed for an ID it does not know, 401
-// user_token_required for an AUTH V2 app, and the result otherwise.
+// user_token_required for an AUTH V2 app, and the result for an AUTH V1 app.
 const probePath = "/search/id?imdb=tt0133093"
 
 // configurationChecks runs the plugin's own Check Connection: it asks Simkl
@@ -38,11 +38,11 @@ func (c *configurationChecks) TestConfiguration(ctx context.Context, req *plugin
 	if clientID == "" {
 		return failed("Enter the client ID of your Simkl API app."), nil
 	}
-	if message := c.checkClientID(ctx, clientID, "client ID"); message != "" {
+	if message := c.checkClientID(ctx, clientID, "client ID", false); message != "" {
 		return failed(message), nil
 	}
 	if v2ClientID := stringField(app, "v2_client_id"); v2ClientID != "" {
-		if message := c.checkClientID(ctx, v2ClientID, "AUTH V2 client ID"); message != "" {
+		if message := c.checkClientID(ctx, v2ClientID, "AUTH V2 client ID", true); message != "" {
 			return failed(message), nil
 		}
 	}
@@ -50,11 +50,16 @@ func (c *configurationChecks) TestConfiguration(ctx context.Context, req *plugin
 }
 
 // checkClientID returns why Simkl refused clientID, or "" when Simkl knows it.
-// label names the setting in the message.
-func (c *configurationChecks) checkClientID(ctx context.Context, clientID, label string) string {
+// label names the setting in the message. With wantV2, only an AUTH V2 app
+// passes: the AUTH V2 sign-in flow refuses an AUTH V1 app's ID.
+func (c *configurationChecks) checkClientID(ctx context.Context, clientID, label string, wantV2 bool) string {
 	status, fault := c.server.simkl.do(ctx, account{clientID: clientID}, http.MethodGet, probePath, nil, nil)
 	switch {
-	case fault == nil, status == http.StatusUnauthorized:
+	case status == http.StatusUnauthorized:
+		return ""
+	case fault == nil && wantV2:
+		return "The " + label + " belongs to an AUTH V1 app. Enter the client ID of an AUTH V2 app, or leave it empty."
+	case fault == nil:
 		return ""
 	case status == http.StatusPreconditionFailed:
 		return "Simkl does not recognize the " + label + ". Copy it again from simkl.com/settings/developer. If it is correct, Simkl may have blocked it for a while after too many requests."
