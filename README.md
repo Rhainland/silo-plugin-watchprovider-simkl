@@ -2,7 +2,7 @@
 
 Connects Silo profiles to [Simkl](https://simkl.com) through Silo's `watch_sync_provider.v1` plugin contract. It replaces the Simkl provider that earlier Silo releases built in, and keeps that provider's behavior so existing connections carry over.
 
-Version 0.4.0 needs a Silo server that supports plugin SDK v0.21, which adds dropped shows, the movie rating hold, and sync warnings to the plugin contract. The **Log rewatches** setting needs a Silo server that supports connection settings from plugin SDK v0.24; an older server does not show it, and rewatches stay off.
+Version 0.4.0 needs a Silo server that supports plugin SDK v0.21, which adds dropped shows, the movie rating hold, and sync warnings to the plugin contract. The **Log rewatches** setting needs a Silo server that supports connection settings from plugin SDK v0.24; an older server does not show it, and rewatches stay off. **Check Connection** on the plugin's settings page needs a Silo server that supports configuration checks from plugin SDK v0.32; an older server reports that connection checks are not supported for this plugin.
 
 ## Capabilities
 
